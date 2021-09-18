@@ -21,7 +21,7 @@
  *  - Modulo multiplication that can handle base 2,654,253 without overflow.
  *  - 6,505,391,993,984,718 main loops if all previous digits are calculated.
  *  - 171,247,233,500 main loops if only the millionth digit is calculated.
- *  pifactory(999996) == 581513092
+ *  pifactory(999995) == 581513092
  */
 
 #include <stdio.h>
@@ -51,7 +51,7 @@ int32_t mul_mod_19(int32_t a, int32_t b, int32_t m) {
  *  Input range: 0 <= a < 16777216 or 2^24
  *  Input range: 0 <= b <= 2796202 or INT32_MAX/256/3
  *  Input range: 0 <= m <= 2796202 or INT32_MAX/256/3
- *  Output range: 0 <= result <= m
+ *  Output range: 0 <= result < m
  */
 int32_t mul_mod_21(int32_t a, int32_t b, int32_t m) {
     int32_t a1 = (a >> 0) & 0xFF;
@@ -150,8 +150,9 @@ int32_t pow_mod(int32_t a, int32_t b, int32_t m) {
 /*  Solve for x: (a * x) % m == 1
  *  https://en.wikipedia.org/wiki/Extended_Euclidean_algorithm#Modular_integers
  *
- *  N divisions is enough to calculate up to Fibonacci(N+3). Gabriel Lamé, 1844.
- *  https://www.cut-the-knot.org/blue/LamesTheorem.shtml
+ *  N divisions is enough to calculate up to Fibonacci(N+3). Donald Knuth, 1981.
+ *  The Art of Computer Programming, Vol. 2: Seminumerical Algorithms, 2nd ed.
+ *  page 343.
  * 
  *  With 2 divisions per loop, 15 loops is enough to calculate up to 3500000.
  *  Test case: 1346269 * 1346269 % 2178309 == 1
@@ -169,9 +170,6 @@ int32_t inv_mod(int32_t a, int32_t m) {
         q = (b == 0) ? 0 : a / b;
         a -= b * q;
         x -= y * q;
-        if (a == 0 || b == 0){
-            break;
-        }
     }
     if (b == 0) {
         return x;
@@ -230,7 +228,7 @@ int32_t factor_count(int32_t *n) {
  *  This is equivalent to the floating point one-liner:
  *  sum = fmod(sum + (double)n / (double)d, 1.0);
  * 
- *  Inputs must be less than 10,737,418 or INT32_MAX/200.
+ *  Inputs must be <= 10,737,418 or INT32_MAX/200.
  */
 void fixed_point_sum(int32_t n, int32_t d, int32_t *hi, int32_t *lo) {
     // Digits 1 to 9
@@ -350,7 +348,7 @@ int32_t pifactory(int32_t start_digit) {
 
             subtotal = (subtotal + t) % m;
         }
-        subtotal = mul_mod_21(subtotal, decimal_shift, m) % m;
+        subtotal = mul_mod_21(subtotal, decimal_shift, m);
 
         // We have a fraction over a prime power, add it to the final sum
         //printf("prime %d = %d/%d\n", prime, subtotal, m);
