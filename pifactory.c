@@ -1,275 +1,391 @@
-/*
- * Computation of the n^th decimal digit of pi with constant memory using
- * only 32-bit integer arithmetic.
- * By David McWilliams, 2021.
+/* 
+ *  Computation of the n^th decimal digit of pi with constant memory using
+ *  only 32-bit integer arithmetic.
+ *  This program is optimized for mapping to Factorio combinators.
+ *  By David McWilliams, 2021.
  *
- * This program is optimized for mapping to Factorio combinators.
- * The first integer overflow occurs when 3*N > sqrt(INT32_MAX).
- * Only the first 17400 digits are guaranteed to be accurate.
+ *  Based on pi1.c by Fabrice Bellard, 1997.
+ *  https://bellard.org/pi/
  *
- * Based on pi1.c by Fabrice Bellard, 1997.
- * https://bellard.org/pi/
+ *  Uses the hypergeometric series by Bill Gosper, 1974.
+ *  pi = sum( (50*n-6)/(binomial(3*n,n)*2^n), n=0..infinity )
+ *  https://arxiv.org/abs/math/0110238
  *
- * Uses the hypergeometric series by Bill Gosper, 1974.
- * pi = sum( (50*n-6)/(binomial(3*n,n)*2^n), n=0..infinity )
- * https://arxiv.org/abs/math/0110238
+ *  Uses the constant memory algorithm by Simon Plouffe, 1996.
+ *  https://arxiv.org/abs/0912.0303
  *
- * Uses the constant memory algorithm by Simon Plouffe, 1996.
- * https://arxiv.org/abs/0912.0303
+ *  See also the faster n^th decimal digit program by Xavier Gourdon, 2003.
+ *  http://numbers.computation.free.fr/Constants/Algorithms/pidec.cpp
  *
- * See also the fastest known n^th decimal digit program by Xavier Gourdon, 2003.
- * http://numbers.computation.free.fr/Constants/Algorithms/pidec.cpp
+ *  To calculate the millionth digit of pi we need:
+ *  - Modulo multiplication that can handle base 2,654,253 without overflow.
+ *  - 6,505,391,993,984,718 main loops if all previous digits are calculated.
+ *  - 171,247,233,500 main loops if only the millionth digit is calculated.
+ *  pifactory(999996) == 581513092
  */
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <math.h>
+#include <stdint.h>
 
-/* Return (a^b) mod m */
-int pow_mod(int a, int b, int m) {
-  int result = 1;
-  while (b > 0) {
-    if (b & 1) {
-      result = result * a % m;
-    }
-    a = a * a % m;
-    b >>= 1;
-  }
-  return result;
-}
-
-/* Solve for x: (a * x) % m == 1
- * https://en.wikipedia.org/wiki/Extended_Euclidean_algorithm#Modular_integers
+/*  Modulo multiplication with 2 tick latency
+ *  Inputs must be <= 46340 or INT32_MAX^(1/2)
  */
-int inv_mod(int a, int m) {
-  if (a < 0) {
-    a += m;
-  }
-  int b = m;
-  int x = 1;
-  int y = 0;
-  int q;
-  // 11 iterations is enough if m is a prime power less than sqrt(INT32_MAX)
-  // Longest test case: a=17711, m=28657
-  for (int i = 0; i < 11; i++) {
-    q = (a == 0) ? 0 : b / a;
-    b -= a * q;
-    y -= x * q;
-    q = (b == 0) ? 0 : a / b;
-    a -= b * q;
-    x -= y * q;
-  }
-  if (b == 0) {
-    return x;
-  } else {
-    return y + m;
-  }
+int32_t mul_mod_15(int32_t a, int32_t b, int32_t m) {
+    return a * b % m;
 }
 
-/* Check if n is prime, 2 <= n < sqrt(INT32_MAX) */
-int is_prime(int n) {
-  static const int SMALL_PRIMES[47] = {
-      2,   3,   5,   7,  11,  13,  17,  19,  23,  29,
-     31,  37,  41,  43,  47,  53,  59,  61,  67,  71,
-     73,  79,  83,  89,  97, 101, 103, 107, 109, 113,
-    127, 131, 137, 139, 149, 151, 157, 163, 167, 173,
-    179, 181, 191, 193, 197, 199, 211
-  };
-  int count = 0;
-  for (int i = 0; i < 47; i++) {
-    // Prime test fails if it is divisible by another prime
-    if (n % SMALL_PRIMES[i] != 0) {
-      count++;
-    }
-    // Exception: a prime is allowed to be divisible by itself
-    if (n == SMALL_PRIMES[i]) {
-      count++;
-    }
-  }
-  // If we passed all 47 tests, it is prime
-  return (count == 47);
+/*  Modulo multiplication with 4 tick latency
+ *  Inputs must be <= 832358 or INT32_MAX/1290/2
+ */
+int32_t mul_mod_19(int32_t a, int32_t b, int32_t m) {
+    // 1290 == INT32_MAX^(1/3)
+    int32_t a1 = a % 1290;
+    int32_t a2 = a / 1290;
+    int32_t b2 = b * 1290 % m;
+    return (a1*b + a2*b2) % m;
 }
 
-/* Return the prime number immediately after n */
-int next_prime(int n) {
-  do {
+/*  Modulo multiplication with 4 tick latency on input a,
+ *  and 6 tick latency on input b.
+ *  Input range: 0 <= a < 16777216 or 2^24
+ *  Input range: 0 <= b <= 2796202 or INT32_MAX/256/3
+ *  Input range: 0 <= m <= 2796202 or INT32_MAX/256/3
+ *  Output range: 0 <= result <= m
+ */
+int32_t mul_mod_21(int32_t a, int32_t b, int32_t m) {
+    int32_t a1 = (a >> 0) & 0xFF;
+    int32_t a2 = (a >> 8) & 0xFF;
+    int32_t a3 = (a >> 16) & 0xFF;
+    int32_t b2 = (b << 8) % m;
+    int32_t b3 = (b2 << 8) % m;
+    return (a1*b + a2*b2 + a3*b3) % m;
+}
+
+/*  Modulo multiplication with 3 tick latency on input a,
+ *  and 7 tick latency on input b.
+ *  Input range: INT32_MIN <= a <= INT32_MAX
+ *  Input range: 0 <= b <= 4194304 or 2^32/256/4
+ *  Input range: 0 <= m <= 4194304 or 2^32/256/4
+ *  Output range: INT32_MIN <= result <= INT32_MAX
+ */
+int32_t mul_mod_22(int32_t a, int32_t b, int32_t m) {
+    int32_t a1 = (uint32_t)a >> 0 & 0xFF;  // Unsigned right-shift is not a
+    int32_t a2 = (uint32_t)a >> 8 & 0xFF;  // built-in instruction in Factorio,
+    int32_t a3 = (uint32_t)a >> 16 & 0xFF; // but it is still easy to do:
+    int32_t a4 = (uint32_t)a >> 24 & 0xFF; // https://forums.factorio.com/71543
+    int32_t b2 = (b << 8) % m;
+    int32_t b3 = (b2 << 8) % m;
+    int32_t b4 = (b3 << 8) % m;
+    return a1*b + a2*b2 + a3*b3 + a4*b4;
+}
+
+/*  Modulo multiplication with 4 tick latency on input a,
+ *  and 7 tick latency on input b.
+ *  Input range: INT32_MIN <= a <= INT32_MAX
+ *  Input range: 0 <= b <= 8421504 or INT32_MAX/255
+ *  Input range: 0 <= m <= 8421504 or INT32_MAX/255
+ *  Output range: -m < result < 4*m
+ */
+int32_t mul_mod_23(int32_t a, int32_t b, int32_t m) {
+    int32_t a1 = (uint32_t)a >> 0 & 0xFF;
+    int32_t a2 = (uint32_t)a >> 8 & 0xFF;
+    int32_t a3 = (uint32_t)a >> 16 & 0xFF;
+    int32_t a4 = (uint32_t)a >> 24 & 0xFF;
+    int32_t b2 = (b << 8) % m;
+    int32_t b3 = (b2 << 8) % m;
+    int32_t b4 = (b3 << 8) % m;
+    return a1*b%m + a2*b2%m + a3*b3%m + a4*b4%m;
+}
+
+/*  Modulo multiplication with 5 tick latency on input a,
+ *  and 7 tick latency on input b.
+ *  Inputs must be <= 9988296 or INT32_MAX/215
+ */
+int32_t mul_mod_24(int32_t a, int32_t b, int32_t m) {
+    // 215 == INT32_MAX^(1/4)
+    int32_t a1 = (a / 1) % 215;
+    int32_t a2 = (a / 215) % 215;
+    int32_t a3 = (a / 46225) % 215;
+    int32_t b2 = (b * 215) % m;
+    int32_t b3 = (b2 * 215) % m;
+    return (a1*b%m + a2*b2%m + a3*b3%m) % m;
+}
+
+/*  Perfect 32-bit modulo multiplication, requires 64-bit instructions
+ */
+int32_t mul_mod_32(int32_t a, int32_t b, int32_t m) {
+    return (int64_t)a * (int64_t)b % m;
+}
+
+/*  Return a^b. 
+ *  This is a built-in instruction in Factorio
+ */
+int32_t powi(int32_t a, int32_t b) {
+    int32_t result = 1;
+    while (b > 0) {
+        if (b & 1) {
+            result *= a;
+        }
+        a *= a;
+        b >>= 1;
+    }
+    return result;
+}
+
+/*  Return (a^b) mod m 
+ */
+int32_t pow_mod(int32_t a, int32_t b, int32_t m) {
+    int32_t result = 1;
+    while (b > 0) {
+        if (b & 1) {
+            result = mul_mod_21(result, a, m);
+        }
+        a = mul_mod_21(a, a, m);
+        b >>= 1;
+    }
+    return result;
+}
+
+/*  Solve for x: (a * x) % m == 1
+ *  https://en.wikipedia.org/wiki/Extended_Euclidean_algorithm#Modular_integers
+ *
+ *  N divisions is enough to calculate up to Fibonacci(N+3). Gabriel Lamé, 1844.
+ *  https://www.cut-the-knot.org/blue/LamesTheorem.shtml
+ * 
+ *  With 2 divisions per loop, 15 loops is enough to calculate up to 3500000.
+ *  Test case: 1346269 * 1346269 % 2178309 == 1
+ */
+int32_t inv_mod(int32_t a, int32_t m) {
+    a = a % m;
+    int32_t b = m;
+    int32_t x = 1;
+    int32_t y = 0;
+    int32_t q;
+    for (int32_t i = 0; i < 15; i++) {
+        q = (a == 0) ? 0 : b / a;
+        b -= a * q;
+        y -= x * q;
+        q = (b == 0) ? 0 : a / b;
+        a -= b * q;
+        x -= y * q;
+        if (a == 0 || b == 0){
+            break;
+        }
+    }
+    if (b == 0) {
+        return x;
+    } else {
+        return y + m;
+    }
+}
+
+/*  Increment n until it is prime
+ */
+int next_prime(int32_t n) {
     n++;
-  } while (!is_prime(n));
-  return n;
-}
-
-int prime_power[10];
-int prime_power_count;
-
-/* Remove prime factors from n and count how many were removed */
-int factor_count(int *n) {
-  for (int i = prime_power_count - 1; i >= 0; i--) {
-    if (*n % prime_power[i] == 0) {
-      *n /= prime_power[i];
-      return i;
+    static int32_t square_root = 0;
+    if (square_root >= n) {
+        // Reset cached value
+        square_root = 0;
     }
-  }
+    while (1) {
+        while (square_root * square_root < n - 1) {
+            square_root++;
+        }
+        int32_t factors = 0;
+        for (int32_t i = 2; i <= square_root; i++) {
+            if (n % i == 0) {
+                factors++;
+                break;
+            }
+        }
+        if (factors > 0) {
+            // Found composite number
+            n++;
+        } else {
+            // Found prime number
+            return n;
+        }
+    }
 }
 
-/* Calculate sum = (sum + n/d) and store the decimal part in fixed-point format
- * with 18 decimal places across two 32-bit integers.
- *
- * This is equivalent to the floating point one-liner:
- * sum = fmod(sum + (double)n / (double)d, 1.0);
- *
- * d must be less than sqrt(INT32_MAX).
- * An exception is made for powers of 2, where d may be up to 8388608.
+/*  Remove prime factors from n and count how many were removed
  */
-void fixed_point_sum(int n, int d, int *hi, int *lo) {
-  // Avoid overflow for large powers of 2
-  int r = 0;
-  if (d > 60000) {
-    d = d / 256;
-    r = n % 256 * 125;
-    n = n / 256;
-  }
-
-  // Digits 1 to 9
-  int a = n * 32000 + r;
-  *hi += a / d * 31250;
-  int b = a % d * 31250;
-  *hi += b / d;
-
-  // Digits 10 to 18
-  int c = b % d * 32000;
-  *lo += c / d * 31250;
-  *lo += c % d * 31250 / d;
-
-  // Carry
-  if (*lo > 1000000000) {
-    *hi += 1;
-  }
-
-  // Discard overflow digits
-  *hi = *hi % 1000000000;
-  *lo = *lo % 1000000000;
+int32_t prime_power[15];
+int32_t prime_power_count;
+int32_t factor_count(int32_t *n) {
+    for (int32_t i = prime_power_count - 1; i >= 0; i--) {
+        if (*n % prime_power[i] == 0) {
+            *n /= prime_power[i];
+            return i;
+        }
+    }
+    return 0; // Never used
 }
 
-/* Return 9 digits of pi */
-int pi_digits(int start_digit) {
-  int sum = 0;
-  int sum_low = 0;
-  // N = (start_digit + 19) / log10(13.5)
-  // log10(13.5) is approximately equal to 269/238
-  int N = (start_digit + 19) * 238 / 269;
+/*  Calculate sum = (sum + n/d) and store the decimal part in fixed-point format
+ *  with 18 decimal places across two 32-bit integers.
+ *
+ *  This is equivalent to the floating point one-liner:
+ *  sum = fmod(sum + (double)n / (double)d, 1.0);
+ * 
+ *  Inputs must be less than 10,737,418 or INT32_MAX/200.
+ */
+void fixed_point_sum(int32_t n, int32_t d, int32_t *hi, int32_t *lo) {
+    // Digits 1 to 9
+    int32_t n1 = n * 200;
+    int32_t n2 = n1 % d * 200;
+    int32_t n3 = n2 % d * 200;
+    int32_t n4 = n3 % d * 125;
+    *hi += n1 / d * 5000000;
+    *hi += n2 / d * 25000;
+    *hi += n3 / d * 125;
+    *hi += n4 / d;
 
-  // Factor the Gosper series into fractions over prime powers
-  for (int prime = 2; prime <= (3 * N); prime = next_prime(prime)) {
-    // Compute the first few prime powers
-    // Only 10 powers are needed if start_digit < 17500
-    // Only powers up to 50000 are needed if start_digit < 17500
-    static const int ROOT_50K[10] = {50000, 50000, 223, 36, 14, 8, 6, 4, 3, 3};
-    prime_power_count = 0;
-    for (int i = 0; i < 10; i++) {
-      if (prime <= ROOT_50K[i]) {
-        prime_power[i] = (int)pow(prime, i);
-        prime_power_count++;
-      }
+    // Digits 10 to 18
+    int32_t n5 = n4 % d * 200;
+    int32_t n6 = n5 % d * 200;
+    int32_t n7 = n6 % d * 200;
+    int32_t n8 = n7 % d * 125;
+    *lo += n5 / d * 5000000;
+    *lo += n6 / d * 25000;
+    *lo += n7 / d * 125;
+    *lo += n8 / d;
+
+    // Carry
+    if (*lo > 1000000000) {
+        *hi += 1;
     }
 
-    // For small primes, use a prime power with exponent greater than 1
-    int exponent = -1;
-    for (int i = 0; i < prime_power_count; i++) {
-      if (prime_power[i] <= (3 * N)) {
-        exponent++;
-      }
-    }
-    int m = (int)pow(prime, exponent);
-
-    if (prime == 2) {
-      // Add the 2^N term in the denominator.
-      exponent += N - 1;
-      // We have some more powers of 2 in the 10^start_digit decimal shift
-      // in the numerator. Use them to cancel out the 2^N term.
-      m = (int)pow(prime, exponent - start_digit);
-      // Since start_digit grows faster than N, eventually we will
-      // cancel the entire exponent and m will become 0.
-      if (m == 0) {
-        continue;
-      }
-    }
-
-    // Multiply by 10^start_digit to move the target digit
-    // to the most significant decimal place.
-    int decimal = 10;
-    if (prime == 2) {
-      // We already used those powers of 2
-      decimal = 5;
-    }
-    int decimal_shift = pow_mod(decimal, start_digit, m);
-
-    // Main loop
-    int subtotal = 0;
-    int numerator = 1;
-    int denominator = 1;
-    //printf("N=%d\n", N);
-    for (int k = 1; k <= N; k++) {
-      // Terms for the numerator
-      int t1 = 2 * k;
-      int t2 = 2 * k - 1;
-      exponent += factor_count(&t1);
-      exponent += factor_count(&t2);
-      int terms = (t1 % m) * (t2 % m) % m;
-      numerator = numerator * terms % m;
-
-      // Terms for the denominator
-      int t3 = 6 * k - 4;
-      int t4 = 9 * k - 3;
-      exponent -= factor_count(&t3);
-      exponent -= factor_count(&t4);
-      terms = (t3 % m) * (t4 % m) % m;
-      denominator = denominator * terms % m;
-      //printf("m=%d k=%d numerator=%d denominator=%d\n", m, k, numerator, denominator);
-
-      // Multiply all parts together
-      int t = (50 * k - 6) % m;
-      t = t * (int)pow(prime, exponent) % m;
-      t = t * numerator % m;
-      t = t * inv_mod(denominator, m);
-
-      subtotal = (subtotal + t) % m;
-    }
-    subtotal = subtotal * decimal_shift % m;
-
-    // We have a fraction over a prime power, add it to the final sum
-    //printf("prime %d = %d/%d\n", prime, subtotal, m);
-    fixed_point_sum(subtotal, m, &sum, &sum_low);
-  }
-  return sum;
+    // Discard overflow digits
+    *hi = *hi % 1000000000;
+    *lo = *lo % 1000000000;
 }
 
-int main(int argc, char *argv[]) {
-  // Display help message
-  if (argc < 2) {
-    printf("This program computes digits of pi.\n");
-    printf("Usage: pifactory <START_DIGIT> [END_DIGIT]\n");
+/*  Return 9 digits of pi
+ */
+int32_t pifactory(int32_t start_digit) {
+    int32_t sum = 0;
+    int32_t sum_low = 0;
+    // N = (start_digit + 19) / log10(13.5)
+    // log10(13.5) is approximately equal to 269/238
+    int32_t N = (start_digit + 19) * 238 / 269;
+
+    // Compute the Gosper series modulo each prime power up to 3*N
+    for (int32_t prime = 2; prime < 3*N; prime = next_prime(prime)) {
+        
+        // Compute the first few prime powers
+        // Only 15 powers are needed if start_digit < 1,000,000
+        // Only powers up to 10,000,000 are needed if start_digit <= 1,000,000
+        static const int32_t ROOT_10M[15] = {
+            10000000, 10000000, 3162, 215, 56, 25, 14, 10, 7, 6, 5, 4, 3, 3, 3
+        };
+        prime_power_count = 0;
+        for (int32_t i = 0; i < 15; i++) {
+            if (prime <= ROOT_10M[i]) {
+                prime_power[i] = powi(prime, i);
+                prime_power_count++;
+            }
+        }
+
+        // For small primes, use a prime power with exponent greater than 1
+        int32_t exponent = -1;
+        for (int32_t i = 0; i < prime_power_count; i++) {
+            if (prime_power[i] < 3*N) {
+                exponent++;
+            }
+        }
+        int32_t m = powi(prime, exponent);
+
+        if (prime == 2) {
+            // Add the 2^N term in the denominator.
+            exponent += N - 1;
+            // We have some more powers of 2 in the 10^start_digit decimal shift
+            // in the numerator. Use them to cancel out the 2^N term.
+            m = powi(prime, exponent - start_digit);
+            // Since start_digit grows faster than N, eventually we will
+            // cancel the entire exponent and m will become 0.
+            if (m == 0) {
+                continue;
+            }
+        }
+
+        // Multiply by 10^start_digit to move the target digit
+        // to the most significant decimal place.
+        int32_t decimal = 10;
+        if (prime == 2) {
+            // We already used those powers of 2
+            decimal = 5;
+        }
+        int32_t decimal_shift = pow_mod(decimal, start_digit, m);
+
+        // Main loop
+        int32_t subtotal = 0;
+        int32_t numerator = 1;
+        int32_t denominator = 1;
+        for (int32_t k = 1; k <= N; k++) {
+            // Terms for the numerator
+            int32_t t1 = 2 * k;
+            int32_t t2 = 2 * k - 1;
+            exponent += factor_count(&t1);
+            exponent += factor_count(&t2);
+            int32_t terms = mul_mod_21(t1 % m, t2 % m, m);
+            numerator = mul_mod_22(numerator, terms, m);
+
+            // Terms for the denominator
+            int32_t t3 = 6 * k - 4;
+            int32_t t4 = 9 * k - 3;
+            exponent -= factor_count(&t3);
+            exponent -= factor_count(&t4);
+            terms = mul_mod_21(t3 % m, t4 % m, m);
+            denominator = mul_mod_22(denominator, terms, m);
+
+            // Multiply all parts together
+            int32_t inverse = inv_mod(denominator, m);
+            int32_t t = (50 * k - 6) % m;
+            t = mul_mod_23(numerator, t, m);
+            t = mul_mod_21(t, powi(prime, exponent), m);
+            t = mul_mod_21(t, inverse, m);
+
+            subtotal = (subtotal + t) % m;
+        }
+        subtotal = mul_mod_21(subtotal, decimal_shift, m) % m;
+
+        // We have a fraction over a prime power, add it to the final sum
+        //printf("prime %d = %d/%d\n", prime, subtotal, m);
+        fixed_point_sum(subtotal, m, &sum, &sum_low);
+    }
+    return sum;
+}
+
+int32_t main(int32_t argc, char *argv[]) {
+    // Display help message
+    if (argc < 2) {
+        printf("This program computes digits of pi.\n");
+        printf("Usage: pifactory <START_DIGIT> [END_DIGIT]\n");
+        return 0;
+    }
+
+    // Read command line arguments
+    int32_t start = strtol(argv[1], NULL, 10);
+    int32_t end = start;
+    if (argc >= 3) {
+        end = strtol(argv[2], NULL, 10);
+    }
+
+    // Turn off output buffer
+    setvbuf(stdout, NULL, _IONBF, 0);
+
+    // Print digits of pi
+    if (start == 0) {
+        printf("3.");
+        start++;
+    }
+    for (int32_t i = start - 1; i < end; i += 9) {
+        printf("%09d", pifactory(i));
+    }
+    printf("\n");
+
     return 0;
-  }
-
-  // Read command line arguments
-  int start = atoi(argv[1]);
-  int end = start;
-  if (argc >= 3) {
-    end = atoi(argv[2]);
-  }
-
-  // Turn off output buffer
-  setvbuf(stdout, NULL, _IONBF, 0);
-
-  // Print digits of pi
-  if (start == 0) {
-    printf("3.");
-    start++;
-  }
-  for (int i = start - 1; i < end; i += 9) {
-    printf("%09d", pi_digits(i));
-  }
-  printf("\n");
-
-  return 0;
 }
